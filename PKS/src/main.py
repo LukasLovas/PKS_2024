@@ -1,34 +1,24 @@
+import sys
 import socket
+from PyQt6.QtWidgets import QApplication
+from ChatGUI import ChatGUI  # Import the separate GUI class
 from User import User
 
-if __name__ == "__main__":  #Nastavenie vlastnych parametrov
+
+if __name__ == "__main__":
+    # Initialize the socket-based user
     my_ip = socket.gethostbyname(socket.gethostname())
     my_port = int(input("Enter your port: "))
 
-    # Init Usera
     user = User(my_ip, my_port)
     user.start_listening_thread()
 
-    send_initial = input("Do you want to send the first message? (yes/no): ").strip().lower()
+    peer_ip = socket.gethostbyname(socket.gethostname())
+    peer_port = int(input("Enter the peer's port: "))
+    user.send_initial(peer_ip, peer_port)
 
-    if send_initial == 'yes':
-        # If sending the first message, ask for the peer's IP and port
-        peer_ip = socket.gethostbyname(socket.gethostname())
-        peer_port = int(input("Enter the peer's port: "))
-        user.send_initial(peer_ip, peer_port)
-
-    # Main loop
-    try:
-        while True:
-            message = input("Enter message to send (or type 'exit' to quit): \n")
-            if message.lower() == 'exit':
-                break
-            user.send(message)
-
-    except KeyboardInterrupt:
-        print("\nCtrl+C detected. Exiting program...")
-
-    finally:
-        user.close_socket()
-
-
+    # Start the PyQt application
+    app = QApplication(sys.argv)
+    chat_gui = ChatGUI(user)  # Pass the User instance to the GUI
+    chat_gui.show()
+    sys.exit(app.exec())

@@ -45,22 +45,22 @@ class User:
             self.socket.sendto(data.encode('utf-8'), self.peer.connection_tuple())
             print(f"Sent: {data} to {self.peer.peer_ip}:{self.peer.peer_port}")
 
+    def listen(self, buffer_size: int = 1024) -> str:
+        try:
+            message, address = self.socket.recvfrom(buffer_size)
+            sender_ip, sender_port = address
+            decoded_message = message.decode('utf-8')
+            print(f"Received message from {sender_ip}:{sender_port}: {decoded_message}\n")
 
+            # If no peer is set, establish the peer connection
+            if self.peer is None:
+                self.set_peer(sender_ip, sender_port)
 
-    def listen(self, buffer_size: int = 1024) -> None:
-        #Listening loop
-        while True:
-            try:
-                message, address = self.socket.recvfrom(buffer_size)
-                sender_ip, sender_port = address
-                print(f"Received message: {message.decode('utf-8')} from {sender_ip}:{sender_port}\nEnter message to send (or type 'exit' to quit): \n")
-
-                #Nastavenie peer usera
-                if self.peer is None:
-                    self.set_peer(sender_ip, sender_port)
-
-            except OSError:
-                break
+            # CHANGED: Return the received message
+            return decoded_message
+        except OSError:
+            # CHANGED: Return an empty string on error instead of crashing
+            return ""
 
 
 
