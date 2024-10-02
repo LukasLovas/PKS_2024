@@ -20,7 +20,7 @@ if __name__ == "__main__":  #Nastavenie vlastnych parametrov
     # Main loop
     try:
         while True:
-            message = input("Enter message to send (or type 'exit' to quit): ")
+            message = input("Enter message to send (or type 'exit' to quit): \n")
             if message.lower() == 'exit':
                 break
             user.send(message)
