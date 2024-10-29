@@ -1,3 +1,4 @@
+from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QLineEdit, QPushButton
 from PyQt6.QtCore import pyqtSignal, QThread
 
@@ -44,6 +45,14 @@ class ChatGUI(QWidget):
 
     def display_message(self, message):
         self.chat_log.append(f"Peer: {message}")
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        ##TODO dorobit close connection packet
+
+        self.user.close_socket()
+        print("Socket closed.")
+
+        event.accept()
 
 
 class ListenThread(QThread):
