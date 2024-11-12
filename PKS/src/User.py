@@ -1,14 +1,16 @@
 import socket
 import threading
 from colorama import init, Fore
+from Header import Header
 
 init(autoreset=True)
 
 
 class User:
-    def __init__(self, ip: str, port: int) -> None:
+    def __init__(self, ip: str, port: int, max_fragment_size=1464) -> None:
         self.ip = ip
         self.port = port
+        self.max_fragment_size = max_fragment_size
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind((ip, port))
         self.peer = None
@@ -28,50 +30,70 @@ class User:
         def connection_tuple(self):
             return self.peer_ip, self.peer_port
 
-    def send(self, data: str) -> None:
-        if self.peer is None:
-            print("No peer set. Cannot send message.")
+    def send(self, message: str, packet_type: int):
+        message_bytes = message.encode('utf-8')
+        if len(message_bytes) <= self.max_fragment_size:
+            print("True")
+            header = Header.create_header(packet_type, message, fragment_order=1, next_fragment=2)
+            self.socket.sendto(header.get_bytes_from_header(), self.peer.connection_tuple())
+            print(f"{Fore.LIGHTCYAN_EX}Sent header: {Fore.RESET}{header}")
         else:
-            self.socket.sendto(data.encode('utf-8'), self.peer.connection_tuple())
-            print(f"{Fore.LIGHTCYAN_EX}Sent: {Fore.RESET}{data}")
+            fragments = [message[i:i + self.max_fragment_size] for i in range(0, len(message), self.max_fragment_size)]
+            for i, fragment in enumerate(fragments):
+                next_fragment = 1 if i < len(fragments) - 1 else 2
+                header = Header.create_header(packet_type, fragment, fragment_order=i + 1, next_fragment=next_fragment)
+                self.socket.sendto(header.get_bytes_from_header(), self.peer.connection_tuple())
+                print(f"{Fore.LIGHTCYAN_EX}Sent fragment {i + 1}/{len(fragments)}")
 
     def send_syn(self, ip: str, port: int) -> None:
-        self.socket.sendto("SYN".encode('utf-8'), (ip, port))
+        header = Header.create_header(1, None)
+        header_data = header.get_bytes_from_header()
+        self.socket.sendto(header_data, (ip, port))
         print(f"{Fore.RED}SYN")
 
     def send_syn_ack(self, ip: str, port: int) -> None:
-        self.socket.sendto("SYN ACK".encode('utf-8'), (ip, port))
+        header = Header.create_header(8, None)
+        header_data = header.get_bytes_from_header()
+        self.socket.sendto(header_data, (ip, port))
         print(f"{Fore.YELLOW}SYN-ACK")
 
     def send_ack(self, ip: str, port: int) -> None:
-        self.socket.sendto("ACK".encode('utf-8'), (ip, port))
+        header = Header.create_header(6, None)
+        header_data = header.get_bytes_from_header()
+        self.socket.sendto(header_data, (ip, port))
         print(f"{Fore.GREEN}ACK")
+
+    def send_fragment_limit_update(self,value):
+        header = Header.create_header(8, value)
+        self.socket.sendto(header.get_bytes_from_header(), self.peer.connection_tuple())
+        print(f"{Fore.LIGHTCYAN_EX}Sent fragment limit update: {self.max_fragment_size}")
 
     def listen(self, buffer_size: int = 1024) -> str:
         try:
             message, address = self.socket.recvfrom(buffer_size)
             sender_ip, sender_port = address
-            decoded_message = message.decode('utf-8')
+            header = Header.get_header_from_bytes(message)
         except OSError:
             print("Error receiving message")
             return ""
+
         if self.peer is None:
-            if decoded_message == "SYN":
-                print(f"{Fore.LIGHTGREEN_EX}OK!")
+            if header.packet_type == 1:
+                print(f"{Fore.LIGHTGREEN_EX}SYN")
                 self.send_syn_ack(sender_ip, sender_port)
-            elif decoded_message == "SYN ACK":
-                print(f"{Fore.LIGHTGREEN_EX}OK!")
+            elif header.packet_type == 7:
+                print(f"{Fore.LIGHTGREEN_EX}SYN-ACK")
                 self.send_ack(sender_ip, sender_port)
                 self.set_peer(sender_ip, sender_port)
                 self.handshake_done = True
-            elif decoded_message == "ACK":
-                print(f"{Fore.LIGHTGREEN_EX}OK!")
+            elif header.packet_type == 6:
+                print(f"{Fore.LIGHTGREEN_EX}ACK")
                 self.set_peer(sender_ip, sender_port)
                 self.handshake_done = True
         else:
-            print(f"{Fore.LIGHTMAGENTA_EX}Receive: {Fore.RESET}{decoded_message}")
+            print(f"{Fore.LIGHTMAGENTA_EX}Receive: {Fore.RESET}{header}")
 
-        return decoded_message
+        return header.data
 
     def start_listening_thread(self) -> None:
         listen_thread = threading.Thread(target=self.listen_handshake, daemon=True)
