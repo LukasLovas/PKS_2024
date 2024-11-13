@@ -5,7 +5,7 @@ class Header:
     def __init__(self, packet_type: int, fragment_order: int, next_fragment: int, data, crc=None):
         self.packet_type = packet_type
         self.fragment_order = fragment_order
-        self.next_fragment = next_fragment #0x01 - yes, 0x02 - no
+        self.next_fragment = next_fragment  # 0x01 - yes, 0x02 - no
         self.data = data if data is not None else ''
         self.data_length = len(self.data) if data is not None else 0
         self.crc = crc if crc is not None else self.calculate_crc()
