@@ -17,7 +17,16 @@ class User:
         self.peer = None
         self.handshake_done = False
         self.header_buffer = {}
-        self.arq_queue = queue.Queue()
+        self.message_queues = {
+            "init": queue.Queue(),  # Initialize Connection
+            "message": queue.Queue(),  # Message Fragments
+            "file": queue.Queue(),  # Image Fragments
+            "keep_alive": queue.Queue(),  # Keep Alive
+            "ACK": queue.Queue(),  # Acknowledge
+            "SYN ACK": queue.Queue(),  # SYN ACK
+            "ARQ": queue.Queue(),  # ARQ
+            "close": queue.Queue()  # End Connection
+        }
         print(f"User listening on {self.ip}:{self.port}")
 
     def set_peer(self, ip: str, port: int) -> None:
@@ -59,7 +68,7 @@ class User:
     def handle_response(self, sent_fragments):
         response = self.arq_queue.get()
         print(f"{Fore.YELLOW}Removed {response.packet_type} from queue")
-        if response.packet_type == 9:
+        if response.packet_type == 7:
             missing_fragments = response.data.split("|") if "|" in response.data else response.data
             missing_fragments = [int(fragment_number) for fragment_number in missing_fragments]
             for fragment_number in missing_fragments:
@@ -68,7 +77,7 @@ class User:
                     header.crc = header.calculate_crc()
                     self.send_fragment(header)
             self.handle_response(sent_fragments)
-        elif response.packet_type == 6:
+        elif response.packet_type == 5:
             print(f"{Fore.GREEN}ACK {Fore.MAGENTA}received for response")
 
     def receive_message(self):
@@ -88,11 +97,11 @@ class User:
                 self.handle_handshake(header, sender_ip, sender_port)
             else:
                 print(f"{Fore.LIGHTMAGENTA_EX}{header}")
-                if header.packet_type == 6:
+                if header.packet_type == 5:
                     self.arq_queue.put(header)
                     print(f"{Fore.YELLOW}Put {header.packet_type} to queue")
                     print(f"{Fore.GREEN} ACK {Fore.MAGENTA} received")
-                if header.packet_type == 9:
+                if header.packet_type == 7:
                     self.arq_queue.put(header)
                     print(f"{Fore.YELLOW}Put {header.packet_type} to queue")
                 if header.packet_type == 2:
@@ -117,12 +126,12 @@ class User:
         if header.packet_type == 1:
             print(f"{Fore.LIGHTGREEN_EX}SYN {Fore.MAGENTA} received")
             self.send_syn_ack(sender_ip, sender_port)
-        elif header.packet_type == 7:
+        elif header.packet_type == 6:
             print(f"{Fore.LIGHTGREEN_EX}SYN-ACK {Fore.MAGENTA} received")
             self.send_ack(sender_ip, sender_port)
             self.set_peer(sender_ip, sender_port)
             self.handshake_done = True
-        elif header.packet_type == 6:
+        elif header.packet_type == 5:
             print(f"{Fore.LIGHTGREEN_EX}ACK {Fore.MAGENTA} received")
             self.set_peer(sender_ip, sender_port)
             self.handshake_done = True
@@ -134,13 +143,13 @@ class User:
         print(f"{Fore.RED}SYN {Fore.LIGHTCYAN_EX}sent")
 
     def send_syn_ack(self, ip: str, port: int) -> None:
-        header = Header.create_header(7, None)
+        header = Header.create_header(6, None)
         header_data = header.get_bytes_from_header()
         self.socket.sendto(header_data, (ip, port))
         print(f"{Fore.YELLOW}SYN-ACK {Fore.LIGHTCYAN_EX}sent")
 
     def send_ack(self, ip: str, port: int) -> None:
-        header = Header.create_header(6, None)
+        header = Header.create_header(5, None)
         header_data = header.get_bytes_from_header()
         self.socket.sendto(header_data, (ip, port))
         print(f"{Fore.GREEN}ACK {Fore.LIGHTCYAN_EX}sent")
