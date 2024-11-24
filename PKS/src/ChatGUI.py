@@ -2,7 +2,8 @@ import traceback
 from pathlib import Path
 
 from PyQt6.QtGui import QCloseEvent
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QLineEdit, QPushButton, QMenu, QInputDialog, QFileDialog
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QLineEdit, QPushButton, QMenu, QInputDialog, QFileDialog, \
+    QLabel
 from PyQt6.QtCore import pyqtSignal, QThread
 import random
 
@@ -29,7 +30,12 @@ class ChatGUI(QWidget):
 
         # Input area
         self.message_input = QLineEdit()
+        self.message_input.setMaxLength(2097152)
         layout.addWidget(self.message_input)
+
+        # Message size counter
+        self.message_size_label = QLabel("Message size: 0 bytes")
+        layout.addWidget(self.message_size_label)
 
         # Send button
         send_button = QPushButton("Send")
@@ -37,12 +43,18 @@ class ChatGUI(QWidget):
         layout.addWidget(send_button)
 
         self.setLayout(layout)
+        self.message_input.textChanged.connect(self.update_message_size)
         self.message_input.returnPressed.connect(self.send_message)
 
         # Start listening for incoming messages
         self.listen_thread = ListenThread(self.user)
         self.listen_thread.new_message.connect(self.display_message)
         self.listen_thread.start()
+
+    def update_message_size(self):
+        """Update the message size counter."""
+        message_size = len(self.message_input.text().encode('utf-8'))
+        self.message_size_label.setText(f"Message size: {message_size} bytes")
 
     def create_menu(self):
         """Creates the menu for fragment size and error simulation options."""
@@ -96,25 +108,34 @@ class ChatGUI(QWidget):
 
     def simulate_crc_error(self):
         message = "CRC TEST MESSAGE"
-        fragments = self.user.fragment_message(message, 2)
-        fragments[1].crc = int(fragments[1].crc / 2)  # Change CRC
-        print("Simulating CRC error...")
-        self.user.send_fragments(fragments)
-        self.user.handle_response(fragments)
-        print("CRC ERROR SIMULATION DONE")
+        fragments = self.user.fragment_message(message, 2)  # 2 is for message packet type
+        if 1 in fragments:
+            fragments[1].crc = fragments[1].crc // 2  # Corrupt the CRC of the first fragment
+            print("Simulating CRC error...")
+            self.user.send_fragments(fragments)  # Send fragments as usual
+            print("CRC ERROR SIMULATION DONE")
+        else:
+            print("No fragments to corrupt.")
 
     def simulate_packet_loss(self):
-        message = Path("resources/lorem_ipsum").read_text()
-        if message:
-            fragments = self.user.fragment_message(message, 2)
-            # Decide which fragments to "lose" by skipping their transmission
-            lost_fragments = random.sample(list(fragments.keys()), k=min(2, len(fragments)))
+        message = "This is a simulated packet loss test message."
+        fragments = self.user.fragment_message(message, 2)  # 2 is for message packet type
+
+        if fragments:
+            lost_fragments = random.sample(
+                list(fragments.keys()), k=min(2, len(fragments))
+            )  # Select up to 2 fragments to "lose"
             print(f"Simulating packet loss, not sending fragments: {lost_fragments}")
-            # Send all fragments except the ones marked for "loss"
+
+            # Send all fragments except those marked as "lost"
             for fragment_order, header in fragments.items():
                 if fragment_order not in lost_fragments:
                     self.user.send_fragment(header)
-            self.message_input.clear()
+                else:
+                    print(f"Fragment {fragment_order} is intentionally lost.")
+            print("Packet loss simulation completed.")
+        else:
+            print("No fragments to send.")
 
     def send_message(self):
         message = self.message_input.text()

@@ -3,8 +3,6 @@ import queue
 import socket
 import threading
 import time
-
-from PyQt6.QtWidgets import QFileDialog
 from colorama import init, Fore
 from Header import Header
 
@@ -85,36 +83,50 @@ class User:
 
     def send_fragments(self, fragments: dict):
         print(f"{Fore.YELLOW}# of fragments to send: {len(fragments)}")
-        for fragment_order, header in fragments.items():
-            ack_received = False
-            retry_count = 0
-            max_retries = 3
+        unacknowledged_fragments = set(fragments.keys())  # Start with all fragments unacknowledged
+        max_retries = 3
+        retries = 0
 
-            while not ack_received and retry_count < max_retries:
+        while unacknowledged_fragments and retries < max_retries:
+            for fragment_order in list(unacknowledged_fragments):
+                header = fragments[fragment_order]
+
+                if retries > 0:
+                    if header.crc != header.calculate_crc():
+                        print(
+                            f"{Fore.RED}CRC mismatch: fragment {fragment_order}")
+                        header.crc = header.calculate_crc()
+
                 self.send_fragment(header)
+
                 try:
-                    response = self.response_queue.get(timeout=3)  # Wait up to 3 seconds
-                    if response.packet_type == 5 and int(
-                            response.data) == fragment_order:  # Check if ACK is for this fragment
-                        print(f"{Fore.GREEN}ACK received for fragment {fragment_order}")
-                        ack_received = True
-                    else:
-                        print(f"{Fore.RED}Invalid ACK or ACK for different fragment received.")
+                    response = self.response_queue.get(timeout=60)
+                    if response.packet_type == 5:  # ACK
+                        acked_fragment = int(response.data)  # ACK data contains the fragment order
+                        if acked_fragment in unacknowledged_fragments:
+                            unacknowledged_fragments.remove(acked_fragment)
+
+                    elif response.packet_type == 7:  # ARQ
+                        missing_fragments = list(map(int, response.data.split(",")))
+                        for missing in missing_fragments:
+                            if missing in fragments:
+                                unacknowledged_fragments.add(missing)
+
                 except queue.Empty:
-                    print(f"{Fore.RED}Timeout waiting for ACK for fragment {fragment_order}. Retrying...")
-                    retry_count += 1
+                    print(f"{Fore.RED}Timeout waiting for ACK or ARQ for fragments: {unacknowledged_fragments}")
 
-            if not ack_received:
-                print(f"{Fore.RED}Failed to send fragment {fragment_order} after {max_retries} retries.")
-                break
+            retries += 1
+            print(f"{Fore.YELLOW}Retrying unacknowledged fragments ({len(unacknowledged_fragments)} remaining)...")
 
-        print(f"{Fore.YELLOW}All fragments sent successfully.")
+        if unacknowledged_fragments:
+            print(f"{Fore.RED}Failed to send all fragments after {max_retries} retries: {unacknowledged_fragments}")
+        else:
+            print(f"{Fore.GREEN}All fragments sent successfully.")
 
     def send_fragment(self, header: Header):
         if self.socket:
             self.socket.sendto(header.to_bytes(), self.peer.connection_tuple())
-        print(
-            f"{Fore.LIGHTCYAN_EX}Sent fragment {header.fragment_order}| Next fragment: {True if header.next_fragment == 1 else False}{Fore.RESET}")
+        #print(f"{Fore.LIGHTCYAN_EX}Sent fragment {header.fragment_order}| Next fragment: {True if header.next_fragment == 1 else False}{Fore.RESET}")
         # print(f"{Fore.LIGHTCYAN_EX}{header}")
 
     def send(self, message: str, packet_type: int):
@@ -154,14 +166,32 @@ class User:
                     self.handle_handshake(header, sender_ip, sender_port)
                 else:
                     if header.packet_type == 2:  # Message packet
-                        # Store fragment in buffer
-                        self.header_buffer[header.fragment_order] = header.data
-                        if header.next_fragment == 0x02:  # If last fragment
-                            full_message = ''.join(self.header_buffer[i] for i in sorted(self.header_buffer))
-                            print(f"{Fore.MAGENTA}Received full message: {Fore.RESET}{full_message}")
+                        print(f"Received fragment no. {header.fragment_order} for message.")
+
+                        # Store the fragment in the buffer
+                        if header.fragment_order not in self.header_buffer:
+                            self.header_buffer[header.fragment_order] = header.data
                             self.send_ack(sender_ip, sender_port, header.fragment_order)
-                            self.header_buffer.clear()
-                            return full_message
+                        else:
+                            print(f"Duplicate fragment {header.fragment_order} received and ignored.")
+
+                        if header.next_fragment == 0x02:  # Last fragment
+                            # Check for missing fragments
+                            missing_fragments = [
+                                i for i in range(1, max(self.header_buffer.keys()) + 1)
+                                if i not in self.header_buffer
+                            ]
+                            if missing_fragments:
+                                print(f"Missing fragments: {missing_fragments}")
+                                self.send_arq(",".join(map(str, missing_fragments)))
+                            else:
+                                # Reassemble the full message
+                                full_message = ''.join(
+                                    self.header_buffer[i] for i in sorted(self.header_buffer)
+                                )
+                                print(f"{Fore.MAGENTA}Reassembled full message: {Fore.RESET}{full_message}")
+                                self.header_buffer.clear()  # Clear the buffer after reassembly
+                                return full_message  # Pass the message back to the ChatGUI
 
                     elif header.packet_type == 3:  # File packet
                         print(f"Received fragment no. {header.fragment_order}")
@@ -202,11 +232,11 @@ class User:
                         print(f"{Fore.GREEN}ACK received for fragment {header.data}")
 
                     elif header.packet_type == 7:  # ARQ
-                        missing_fragments = list(map(int, header.data.split(",")))
-                        print(f"ARQ received for fragments: {missing_fragments}")
-                        for fragment_order in missing_fragments:
-                            if fragment_order in self.fragments:
-                                self.send_fragment(self.fragments[fragment_order])
+                        self.response_queue.put(header)
+                        self.send_ack(sender_ip, sender_port, header.fragment_order)
+                        print(f"{Fore.RED}ARQ received: Missing fragments {header.data}")
+
+
 
             else:
                 print(f"{Fore.RED}Invalid CRC for fragment {header.fragment_order}")
@@ -215,7 +245,7 @@ class User:
     def send_arq(self, missing_fragments):
         missing_fragments_str = ",".join(map(str, missing_fragments))
         print(f"Sending ARQ for missing fragments: {missing_fragments_str}")
-        fragments = self.fragment_message(missing_fragments_str, packet_type=9)  # Packet type 9 for ARQ
+        fragments = self.fragment_message(missing_fragments_str, packet_type=7)
         self.send_fragments(fragments)
 
     def handle_handshake(self, header, sender_ip, sender_port):
@@ -304,7 +334,7 @@ class User:
         if self.peer:
             header = Header.create_header(packet_type=4, data="")
             self.send_fragment(header)
-            print(f"{Fore.BLUE}Heartbeat sent.")
+            #print(f"{Fore.BLUE}Heartbeat sent.")
             self.heartbeats += 1
 
     def handle_connection_loss(self):
