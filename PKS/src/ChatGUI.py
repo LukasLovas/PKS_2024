@@ -1,7 +1,8 @@
+import traceback
 from pathlib import Path
 
 from PyQt6.QtGui import QCloseEvent
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QDialog, QMenu, QInputDialog
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QLineEdit, QPushButton, QMenu, QInputDialog, QFileDialog
 from PyQt6.QtCore import pyqtSignal, QThread
 import random
 
@@ -47,6 +48,10 @@ class ChatGUI(QWidget):
         """Creates the menu for fragment size and error simulation options."""
         menu = QMenu()
 
+        # Send file Option
+        fragment_size_action = menu.addAction("Send File")
+        fragment_size_action.triggered.connect(self.send_file)
+
         # Fragment Size Option
         fragment_size_action = menu.addAction("Fragment Size")
         fragment_size_action.triggered.connect(self.open_fragment_size_dialog)
@@ -59,12 +64,32 @@ class ChatGUI(QWidget):
         packet_loss_action = menu.addAction("Error Simulation Lost Packet")
         packet_loss_action.triggered.connect(self.simulate_packet_loss)
 
+        # Directory Option
+        save_directory_action = menu.addAction("Set Save Directory")
+        save_directory_action.triggered.connect(self.set_save_directory)
+
         return menu
+
+    def send_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select File to Send")
+        if file_path:
+            try:
+                self.user.send_file(file_path)
+                self.chat_log.append(f"File sent successfully.")
+            except Exception:
+                print(traceback.format_exc())
+
+    def set_save_directory(self):
+        selected_dir = QFileDialog.getExistingDirectory(self, "Select Save Directory", self.user.file_directory)
+        if selected_dir:
+            self.user.file_directory = selected_dir
+            self.chat_log.append(f"Save directory updated to: {selected_dir}")
+            print(f"Save directory updated to: {selected_dir}")
 
     def open_fragment_size_dialog(self):
         """Opens a modal dialog for setting fragment size."""
         fragment_size, ok = QInputDialog.getInt(self, "Set Fragment Size", "Fragment Size (bytes):",
-                                                self.user.max_fragment_size, 100, 1464)
+                                                self.user.max_fragment_size, 100, 1462)
         if ok:
             self.user.max_fragment_size = fragment_size
             print(f"Updated fragment limit to {fragment_size} bytes")
@@ -72,7 +97,7 @@ class ChatGUI(QWidget):
     def simulate_crc_error(self):
         message = "CRC TEST MESSAGE"
         fragments = self.user.fragment_message(message, 2)
-        fragments[1].crc = int(fragments[1].crc / 2)  #Change CRC
+        fragments[1].crc = int(fragments[1].crc / 2)  # Change CRC
         print("Simulating CRC error...")
         self.user.send_fragments(fragments)
         self.user.handle_response(fragments)
@@ -105,6 +130,9 @@ class ChatGUI(QWidget):
         self.user.close_socket()
         print("Socket closed.")
         event.accept()
+
+    def display_message_end(self, message):
+        self.chat_log.append(message)
 
 
 class ListenThread(QThread):

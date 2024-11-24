@@ -23,7 +23,10 @@ if __name__ == "__main__":
     while not user.handshake_done:
         pass
 
+    user.start_keepalive_thread()
+
     app = QApplication(sys.argv)
     chat_gui = ChatGUI(user)
+    user.chat_gui = chat_gui
     chat_gui.show()
     sys.exit(app.exec())

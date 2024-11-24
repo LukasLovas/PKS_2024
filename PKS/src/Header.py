@@ -21,33 +21,41 @@ class Header:
 
     def get_bytes_from_header(self):
         return (
-                self.packet_type.to_bytes(1, 'big') +
-                self.fragment_order.to_bytes(2, 'big') +
-                int(self.next_fragment).to_bytes(1, 'big') +
-                self.data_length.to_bytes(2, 'big') +
-                self.crc.to_bytes(2, 'big') +
-                self.data.encode('utf-8')
-        )
+            self.packet_type.to_bytes(1, 'big') +
+            self.fragment_order.to_bytes(4, 'big') +
+            int(self.next_fragment).to_bytes(1, 'big') +
+            self.data_length.to_bytes(2, 'big') +
+            self.crc.to_bytes(2, 'big') +
+            self.data.encode('utf-8'))
 
+    def get_bytes_from_header_ex_data(self):
+        return (
+            self.packet_type.to_bytes(1, 'big') +
+            self.fragment_order.to_bytes(4, 'big') +
+            int(self.next_fragment).to_bytes(1, 'big') +
+            self.data_length.to_bytes(2, 'big') +
+            self.crc.to_bytes(2, 'big') +
+            self.data
+        )
     def calculate_crc(self):
         crc_calculator = Calculator(Crc16.MODBUS, optimized=True)
         partial_header = (
-                self.packet_type.to_bytes(1, 'big') +
-                self.fragment_order.to_bytes(2, 'big') +
-                self.next_fragment.to_bytes(1, 'big') +
-                self.data_length.to_bytes(2, 'big') +
-                self.data.encode('utf-8')
+            self.packet_type.to_bytes(1, 'big') +
+            self.fragment_order.to_bytes(4, 'big') +
+            self.next_fragment.to_bytes(1, 'big') +
+            self.data_length.to_bytes(2, 'big') +
+            self.data
         )
         return crc_calculator.checksum(partial_header)
 
     @staticmethod
     def get_header_from_bytes(data_bytes):
         packet_type = int.from_bytes(data_bytes[0:1], 'big')
-        fragment_order = int.from_bytes(data_bytes[1:3], 'big')
-        next_fragment = int.from_bytes(data_bytes[3:4], 'big')
-        data_length = int.from_bytes(data_bytes[4:6], 'big')
-        crc = int.from_bytes(data_bytes[6:8], 'big')
-        data = data_bytes[8:8 + data_length].decode('utf-8')
+        fragment_order = int.from_bytes(data_bytes[1:5], 'big')
+        next_fragment = int.from_bytes(data_bytes[5:6], 'big')
+        data_length = int.from_bytes(data_bytes[6:8], 'big')
+        crc = int.from_bytes(data_bytes[8:10], 'big')
+        data = data_bytes[10:10 + data_length]
 
         return Header(packet_type, fragment_order, next_fragment, data, crc)
 
