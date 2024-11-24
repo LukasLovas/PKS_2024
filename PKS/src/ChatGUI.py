@@ -128,7 +128,6 @@ class ChatGUI(QWidget):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.user.close_socket()
-        print("Socket closed.")
         event.accept()
 
     def display_message_end(self, message):
@@ -146,7 +145,4 @@ class ListenThread(QThread):
         while True:
             message = self.user.listen()
             if message:
-                if message == 10:
-                    self.user.close_socket()
-                    message = "Communication closed"
                 self.new_message.emit(message)

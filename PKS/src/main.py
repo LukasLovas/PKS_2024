@@ -10,7 +10,7 @@ if __name__ == "__main__":
     my_port = int(input("Enter your port: "))
 
     user = User(my_ip, my_port)
-    user.start_listening_thread()
+    thread = user.start_listening_thread()
 
     if int(input("Do you want to initialize a connection? [0/1]: ")) == 1:
         #peer_ip = str(input("Enter IP:"))
@@ -22,7 +22,7 @@ if __name__ == "__main__":
 
     while not user.handshake_done:
         pass
-
+    thread.join()
     user.start_keepalive_thread()
 
     app = QApplication(sys.argv)
