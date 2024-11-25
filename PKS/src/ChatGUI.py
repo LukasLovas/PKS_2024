@@ -103,6 +103,7 @@ class ChatGUI(QWidget):
                                                 self.user.max_fragment_size, 100, 1462)
         if ok:
             self.user.max_fragment_size = fragment_size
+            self.display_message(f"Updated fragment limit to {fragment_size} bytes")
             print(f"Updated fragment limit to {fragment_size} bytes")
 
     def send_message(self):

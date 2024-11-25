@@ -21,8 +21,8 @@ if __name__ == "__main__":
     else:
         print("Waiting for incoming connection...")
 
-    # Wait for handshake to complete
-    while not user.handshake_done:
+    # Wait for handshake
+    while not user.connected:
         time.sleep(0.1)
 
     user.start_keepalive_thread()

@@ -13,14 +13,15 @@ DELIMITER = "|:|"
 
 class User:
     def __init__(self, ip: str, port: int, max_fragment_size=1462) -> None:
+        self.running = True
         self.ip = ip
         self.port = port
         self.max_fragment_size = max_fragment_size
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind((ip, port))
         self.peer = None
-        self.handshake_done = False
-        self.header_buffer = {}  # Receiving headers buffer
+        self.connected = False
+        self.header_buffer = {}  # Receiving header buffer
         self.fragments = {}  # Fragments to send
         self.sender_queue = queue.Queue()
         self.response_queue = queue.Queue()  # Response queue
@@ -41,6 +42,7 @@ class User:
         self.receiver_thread = threading.Thread(target=self.listen_loop, daemon=True)
         self.receiver_thread.start()
 
+    # Setting up file directory in case it doesn´t exist
     def setup_file_dir(self, directory_name="received_files"):
         project_root = os.path.abspath(os.path.dirname(__file__))
         file_dir_path = os.path.join(project_root, directory_name)
@@ -49,10 +51,12 @@ class User:
             print(f"Created file directory: {file_dir_path}")
         return file_dir_path
 
+    # Setting peer
     def set_peer(self, ip: str, port: int) -> None:
         self.peer = self.Peer(ip, port)
         print(f"Peer set to {self.peer.peer_ip}:{self.peer.peer_port}")
 
+    #Peer class for helping with sending
     class Peer:
         def __init__(self, ip: str, port: int) -> None:
             self.peer_ip = ip
@@ -61,6 +65,7 @@ class User:
         def connection_tuple(self):
             return self.peer_ip, self.peer_port
 
+    #Transform message into fragments for sending
     def fragment_message(self, data: str, packet_type: int):
         fragment_size = self.max_fragment_size
         data_encoded = data.encode("utf-8")
@@ -72,11 +77,12 @@ class User:
             fragment_data = data_encoded[i * fragment_size:(i + 1) * fragment_size].decode("utf-8")
             next_fragment = 0x01 if fragment_order < total_fragments else 0x02
             header = Header.create_header(packet_type, fragment_data, fragment_order, next_fragment)
-            fragments[fragment_order] = header
-            self.fragments[header.fragment_order] = header  # Store for potential retransmission
+            fragments[fragment_order] = header # return object
+            self.fragments[header.fragment_order] = header  # storing in case of resend
 
         return fragments
 
+    #Fragment file into fragments for sending
     def fragment_file(self, file_path: str, packet_type: int):
         fragment_size = self.max_fragment_size
         with open(file_path, "rb") as file:
@@ -91,8 +97,7 @@ class User:
         for i in range(total_fragments):
             fragment_order = i + 1
             fragment_data = data_encoded[i * fragment_size:(i + 1) * fragment_size]
-            # Since data is bytes, we need to handle it appropriately
-            fragment_data_str = fragment_data.decode('latin1')  # Use 'latin1' to convert bytes to string
+            fragment_data_str = fragment_data.decode('latin1')
             next_fragment = 0x01 if fragment_order < total_fragments else 0x02
             header = Header.create_header(packet_type, fragment_data_str, fragment_order, next_fragment)
             fragments[fragment_order] = header
@@ -137,7 +142,7 @@ class User:
     def send_packet(self, packet):
         # Determine if we need to wait for an ACK based on packet type
         # Data packets (2,3,7,8) require ACK
-        wait_for_response = packet['packet_type'] in [2, 3, 7, 8]
+        wait_for_response = packet['packet_type'] in [2, 3, 7]
         max_retries = 3
         retries = 0
         while retries < max_retries:
@@ -205,12 +210,19 @@ class User:
 
     # Receiver loop
     def listen_loop(self):
-        while True:
+        while self.running:
+            if self.socket is None:
+                print("Socket is None, exiting listen loop")
+                break
             self.listen()
 
     # Process received packets
     def listen(self):
         try:
+            if self.socket is None:
+                print("Socket is None, exiting listen method")
+                self.running = False
+                return
             data, address = self.socket.recvfrom(1500)
             sender_ip, sender_port = address
             header = Header.from_bytes(data)
@@ -271,13 +283,19 @@ class User:
                         print(f"SYN-ACK received from {address}")
                         self.set_peer(sender_ip, sender_port)
                         self.send_ack(0)
-                        self.handshake_done = True
+                        self.connected = True
                     elif header.packet_type == 4:  # Heartbeat
                         self.heartbeats = 0
                         print("Heartbeat received")
-                    # Handle other packet types as needed
+                    elif header.packet_type == 8:
+                        self.peer = None
+                        self.close_socket()
+        except OSError as e:
+            print(f"Socket closed, exiting listen method: {e}")
+            self.running = False
         except Exception as e:
             print(f"Error in listen loop: {e}")
+            self.running = False
 
     # Send ACK
     def send_ack(self, fragment_order=1, immediate=False):
@@ -297,6 +315,19 @@ class User:
         print(
             f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
         print(f"{Fore.GREEN}ACK sent for fragment {fragment_order}")
+
+    # Send ACK
+    def send_terminate(self, fragment_order=1):
+        if self.connected:
+            header = Header.create_header(8, str(fragment_order))
+            packet = {
+                'data': header.to_bytes(),
+                'address': (self.peer.peer_ip, self.peer.peer_port),
+                'packet_type': header.packet_type,
+                'fragment_order': fragment_order,
+                'header': header
+            }
+            self.send_packet(packet)
 
     # Send ARQ
     def send_arq(self, missing_fragments, address):
@@ -323,11 +354,11 @@ class User:
             print(f"{Fore.LIGHTGREEN_EX}SYN-ACK received")
             self.set_peer(sender_ip, sender_port)
             self.send_ack(0)
-            self.handshake_done = True
+            self.connected = True
         elif header.packet_type == 5:
             print(f"{Fore.LIGHTGREEN_EX}ACK received")
             self.set_peer(sender_ip, sender_port)
-            self.handshake_done = True
+            self.connected = True
 
     # Handle message fragments
     def handle_message_fragment(self, header: Header):
@@ -429,17 +460,6 @@ class User:
             f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
         print(f"{Fore.YELLOW}SYN-ACK sent to {(ip, port)}")
 
-    # Close socket
-    def close_socket(self):
-        self.keepalive_running = False
-        try:
-            if self.socket:
-                self.socket.close()
-                self.socket = None
-                print("Socket successfully closed.")
-        except Exception as e:
-            print(f"Error while closing socket: {e}")
-
     # Sender loop
     def send_queue_loop(self):
         while True:
@@ -452,6 +472,7 @@ class User:
                 self.send_packet(packet)
             except Exception as e:
                 print(f"Error in sending thread: {e}")
+                break
 
     # Start keepalive thread
     def start_keepalive_thread(self):
@@ -463,15 +484,13 @@ class User:
     # Adjusted keepalive_loop
     def keepalive_loop(self):
         while self.keepalive_running:
-            if not self.handshake_done:
-                break
             if not self.response_queue.empty():
                 time.sleep(1)
                 continue
             self.send_heartbeat()
-            time.sleep(5)  # Increased heartbeat interval to 15 seconds
+            time.sleep(5)
             if self.heartbeats >= 3:
-                self.handle_connection_loss()
+                self.close_socket()
                 break
         print("Keepalive thread terminated.")
 
@@ -491,12 +510,14 @@ class User:
             print(f"{Fore.BLUE}Heartbeat sent.")
             self.heartbeats += 1
 
-    def handle_connection_loss(self):
+    def close_socket(self):
+        if self.peer is not None:
+            self.send_terminate()
+        self.running = False
+        self.connected = False
         self.keepalive_running = False
         try:
             if self.socket:
-                self.sender_thread.join()
-                self.receiver_thread.join()
                 self.socket.close()
                 self.socket = None
                 print("Socket successfully closed.")
