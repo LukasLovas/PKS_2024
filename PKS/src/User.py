@@ -21,12 +21,17 @@ class User:
         self.socket.bind((ip, port))
         self.peer = None
         self.connected = False
-        self.header_buffer = {}  # Receiving header buffer
-        self.fragments = {}  # Fragments to send
+        self.header_buffer = {}  # receiving buffer
+        self.message_buffer = {}  # message data buffer
+        self.message_total_bytes = 0
+        self.file_total_bytes = 0
+        self.file_buffer = {}
+        self.current_filename = None
+        self.fragments = {}  # fragments to send
         self.sender_queue = queue.Queue()
-        self.response_queue = queue.Queue()  # Response queue
+        self.response_queue = queue.Queue()  # response queue
         self.keepalive_running = False
-        self.heartbeats = 0  # Heartbeats without response
+        self.heartbeats = 0  # heartbeats without response
         self.chat_gui = None
         self.current_filename = None
         self.file_directory = self.setup_file_dir()
@@ -36,7 +41,6 @@ class User:
         self.lock = threading.Lock()
         print(f"User listening on {self.ip}:{self.port}")
 
-        # Start sender and receiver threads
         self.sender_thread = threading.Thread(target=self.send_queue_loop, daemon=True)
         self.sender_thread.start()
         self.receiver_thread = threading.Thread(target=self.listen_loop, daemon=True)
@@ -56,7 +60,7 @@ class User:
         self.peer = self.Peer(ip, port)
         print(f"Peer set to {self.peer.peer_ip}:{self.peer.peer_port}")
 
-    #Peer class for helping with sending
+    # Peer class for helping with sending
     class Peer:
         def __init__(self, ip: str, port: int) -> None:
             self.peer_ip = ip
@@ -65,7 +69,7 @@ class User:
         def connection_tuple(self):
             return self.peer_ip, self.peer_port
 
-    #Transform message into fragments for sending
+    # Transform message into fragments for sending
     def fragment_message(self, data: str, packet_type: int):
         fragment_size = self.max_fragment_size
         data_encoded = data.encode("utf-8")
@@ -77,12 +81,12 @@ class User:
             fragment_data = data_encoded[i * fragment_size:(i + 1) * fragment_size].decode("utf-8")
             next_fragment = 0x01 if fragment_order < total_fragments else 0x02
             header = Header.create_header(packet_type, fragment_data, fragment_order, next_fragment)
-            fragments[fragment_order] = header # return object
+            fragments[fragment_order] = header  # return object
             self.fragments[header.fragment_order] = header  # storing in case of resend
 
         return fragments
 
-    #Fragment file into fragments for sending
+    # Fragment file into fragments for sending
     def fragment_file(self, file_path: str, packet_type: int):
         fragment_size = self.max_fragment_size
         with open(file_path, "rb") as file:
@@ -97,7 +101,7 @@ class User:
         for i in range(total_fragments):
             fragment_order = i + 1
             fragment_data = data_encoded[i * fragment_size:(i + 1) * fragment_size]
-            fragment_data_str = fragment_data.decode('latin1')
+            fragment_data_str = fragment_data.decode('latin1')  # utf-8 nefunguje??
             next_fragment = 0x01 if fragment_order < total_fragments else 0x02
             header = Header.create_header(packet_type, fragment_data_str, fragment_order, next_fragment)
             fragments[fragment_order] = header
@@ -362,9 +366,8 @@ class User:
 
     # Handle message fragments
     def handle_message_fragment(self, header: Header):
-        if not hasattr(self, 'message_buffer'):
-            self.message_buffer = {}
         self.message_buffer[header.fragment_order] = header.data
+        self.message_total_bytes += len(header.data.encode("utf-8"))
 
         if header.next_fragment == 0x02:  # Last fragment
             # Check for missing fragments
@@ -380,19 +383,18 @@ class User:
                 full_message = ''.join(
                     self.message_buffer[i] for i in sorted(self.message_buffer)
                 )
-                print(f"{Fore.MAGENTA}Reassembled full message: {Fore.RESET}{full_message}")
+                print(f"{Fore.MAGENTA}Message: {Fore.RESET}{full_message}")
+                print(f"{Fore.GREEN}Message total bytes: {self.message_total_bytes} bytes")
                 if self.chat_gui:
                     self.chat_gui.display_message(f"{full_message}")
                 self.message_buffer.clear()  # Clear the buffer after reassembly
+                self.message_total_bytes = 0
 
     # Handle file fragments
     def handle_file_fragment(self, header: Header):
-        if not hasattr(self, 'file_buffer'):
-            self.file_buffer = {}
-            self.current_filename = None
-
         # Store fragment data
         self.file_buffer[header.fragment_order] = header.data
+        self.file_total_bytes += len(header.data.encode("latin1")) #utf-8????
 
         if header.fragment_order == 1:
             # Extract filename
@@ -410,13 +412,14 @@ class User:
                 print(f"Missing file fragments: {missing_fragments}")
                 self.send_arq(missing_fragments, self.peer.connection_tuple())
             else:
-                # Reassemble the full file data
                 full_file_data = ''.join(
                     self.file_buffer[i] for i in sorted(self.file_buffer)
                 ).encode('latin1')
                 # Save the file
                 self.save_file(self.current_filename, full_file_data)
+                print(f"{Fore.GREEN}File total bytes: {self.file_total_bytes} bytes")
                 self.file_buffer.clear()  # Clear the buffer after reassembly
+                self.file_total_bytes = 0  # Reset total bytes counter
 
     # Save received file
     def save_file(self, filename: str, data: bytes):
