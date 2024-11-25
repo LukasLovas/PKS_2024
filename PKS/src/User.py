@@ -112,6 +112,8 @@ class User:
                 'header': header  # Keep header for retransmission
             }
             self.sender_queue.put(packet)
+            print(
+                f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
 
     # Send file method
     def send_file(self, file_path: str):
@@ -125,6 +127,8 @@ class User:
                 'header': header  # Keep header for retransmission
             }
             self.sender_queue.put(packet)
+            print(
+                f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
         if self.chat_gui:
             filename = os.path.basename(file_path)
             self.chat_gui.chat_log.append(f"You sent a file: {filename}")
@@ -133,7 +137,7 @@ class User:
     def send_packet(self, packet):
         # Determine if we need to wait for an ACK based on packet type
         # Data packets (2,3,7,8) require ACK
-        wait_for_ack = packet['packet_type'] in [2, 3, 7, 8]
+        wait_for_response = packet['packet_type'] in [2, 3, 7, 8]
         max_retries = 3
         retries = 0
         while retries < max_retries:
@@ -150,21 +154,26 @@ class User:
 
             # Send the packet
             self.socket.sendto(packet['data'], packet['address'])
-            print(f"Sent packet type {packet['packet_type']} fragment {packet['fragment_order']} to {packet['address']}")
-            if wait_for_ack:
-                # Wait for ACK
+            print(
+                f"Sent packet type {packet['packet_type']} fragment {packet['fragment_order']} to {packet['address']}")
+            if wait_for_response:
+                # Wait for response
                 try:
-                    response = self.response_queue.get(timeout=5)
+                    print(f"STUCK: {time.time()}")
+                    response = self.response_queue.get(timeout=3)  # Increased timeout to 10 seconds
                     if response.packet_type == 5:  # ACK
                         acked_fragment = int(response.data)
                         if acked_fragment == packet['fragment_order']:
                             print(f"{Fore.GREEN}ACK received for fragment {acked_fragment}")
                             break  # ACK received, proceed to next packet
                         else:
-                            print(f"{Fore.YELLOW}Received ACK for fragment {acked_fragment}, expected {packet['fragment_order']}")
+                            print(
+                                f"{Fore.YELLOW}Received ACK for fragment {acked_fragment}, expected {packet['fragment_order']}")
                     elif response.packet_type == 7:  # ARQ
                         missing_fragments = list(map(int, response.data.split(",")))
                         print(f"{Fore.RED}ARQ received for fragments {missing_fragments}")
+                        # Send ACK for ARQ
+                        # self.send_ack(0, True)
                         # Resend missing fragments
                         for fragment_order in missing_fragments:
                             if fragment_order in self.fragments:
@@ -178,9 +187,12 @@ class User:
                                     'header': header_to_resend
                                 }
                                 self.sender_queue.put(resend_packet)
+                                print(
+                                    f"Put type {resend_packet.get('packet_type')} into sender queue, sender queue "
+                                    f"state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
                                 print(f"Resending fragment {fragment_order}")
-                        # For the current packet, increment retries
-                        retries += 1
+                        # Do not increment retries here; continue waiting for ACK
+                        continue
                 except queue.Empty:
                     print(f"{Fore.YELLOW}Timeout waiting for ACK for fragment {packet['fragment_order']}, retrying...")
                     retries += 1
@@ -188,26 +200,14 @@ class User:
                 # Control packets, no need to wait for ACK
                 break
 
-        if wait_for_ack and retries == max_retries:
+        if wait_for_response and retries == max_retries:
             print(f"{Fore.RED}Failed to send packet after {max_retries} retries")
-
-    # Sender loop
-    def send_queue_loop(self):
-        while True:
-            try:
-                packet = self.sender_queue.get()
-                if packet is None:
-                    break  # Exit the thread
-                self.send_packet(packet)
-            except Exception as e:
-                print(f"Error in sending thread: {e}")
 
     # Receiver loop
     def listen_loop(self):
         while True:
             self.listen()
 
-    # Process received packets
     # Process received packets
     def listen(self):
         try:
@@ -236,11 +236,14 @@ class User:
                         self.send_ack(header.fragment_order)
                     elif header.packet_type == 5:  # ACK
                         self.response_queue.put(header)
+                        print(
+                            f"Put type {header.packet_type} into sender queue, sender queue "
+                            f"state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
                         print(f"{Fore.GREEN}ACK received for fragment {header.data}")
                     elif header.packet_type == 7:  # ARQ
                         print(f"{Fore.RED}ARQ received for fragments {header.data}")
                         # Send ACK for ARQ
-                        self.send_ack(0)
+                        self.send_ack(0, True)
                         # Resend the requested fragments
                         missing_fragments = list(map(int, header.data.split(",")))
                         for fragment_order in missing_fragments:
@@ -255,6 +258,8 @@ class User:
                                     'header': header_to_resend
                                 }
                                 self.sender_queue.put(resend_packet)
+                                print(
+                                    f"Put type {resend_packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
                                 print(f"Resending fragment {fragment_order}")
                             else:
                                 print(f"No fragment found with order {fragment_order} to resend")
@@ -275,7 +280,7 @@ class User:
             print(f"Error in listen loop: {e}")
 
     # Send ACK
-    def send_ack(self, fragment_order=1):
+    def send_ack(self, fragment_order=1, immediate=False):
         header = Header.create_header(5, str(fragment_order))
         packet = {
             'data': header.to_bytes(),
@@ -284,7 +289,13 @@ class User:
             'fragment_order': fragment_order,
             'header': header
         }
-        self.sender_queue.put(packet)
+        if immediate:
+            self.send_packet(packet)
+            print("SENT IMMEDIATE ACK")
+        else:
+            self.sender_queue.put(packet)
+        print(
+            f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
         print(f"{Fore.GREEN}ACK sent for fragment {fragment_order}")
 
     # Send ARQ
@@ -299,6 +310,8 @@ class User:
             'header': header
         }
         self.sender_queue.put(packet)
+        print(
+            f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
         print(f"{Fore.YELLOW}ARQ sent for fragments {missing_fragments}")
 
     # Handle handshake
@@ -397,6 +410,8 @@ class User:
             'header': header
         }
         self.sender_queue.put(packet)
+        print(
+            f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
         print(f"{Fore.RED}SYN sent to {(ip, port)}")
 
     # Send SYN-ACK
@@ -410,6 +425,8 @@ class User:
             'header': header
         }
         self.sender_queue.put(packet)
+        print(
+            f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
         print(f"{Fore.YELLOW}SYN-ACK sent to {(ip, port)}")
 
     # Close socket
@@ -423,6 +440,19 @@ class User:
         except Exception as e:
             print(f"Error while closing socket: {e}")
 
+    # Sender loop
+    def send_queue_loop(self):
+        while True:
+            try:
+                packet = self.sender_queue.get()
+                print(
+                    f"Took type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
+                if packet is None:
+                    break  # Exit the thread
+                self.send_packet(packet)
+            except Exception as e:
+                print(f"Error in sending thread: {e}")
+
     # Start keepalive thread
     def start_keepalive_thread(self):
         self.keepalive_running = True
@@ -430,6 +460,7 @@ class User:
         print(f"Keepalive started for {self.peer.peer_ip}:{self.peer.peer_port}")
         self.keepalive_thread.start()
 
+    # Adjusted keepalive_loop
     def keepalive_loop(self):
         while self.keepalive_running:
             if not self.handshake_done:
@@ -438,7 +469,7 @@ class User:
                 time.sleep(1)
                 continue
             self.send_heartbeat()
-            time.sleep(5)
+            time.sleep(5)  # Increased heartbeat interval to 15 seconds
             if self.heartbeats >= 3:
                 self.handle_connection_loss()
                 break
@@ -455,6 +486,8 @@ class User:
                 'header': header
             }
             self.sender_queue.put(packet)
+            print(
+                f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
             print(f"{Fore.BLUE}Heartbeat sent.")
             self.heartbeats += 1
 
@@ -462,6 +495,8 @@ class User:
         self.keepalive_running = False
         try:
             if self.socket:
+                self.sender_thread.join()
+                self.receiver_thread.join()
                 self.socket.close()
                 self.socket = None
                 print("Socket successfully closed.")
@@ -471,12 +506,10 @@ class User:
         if self.chat_gui:
             self.chat_gui.display_message("Connection lost. Communication terminated.")
 
-    # Simulate CRC error
     def enable_crc_error_simulation(self):
         self.crc_error_simulation = True
 
-    # Corrupt packet for CRC error simulation
     def corrupt_packet(self, data: bytes) -> bytes:
         header = Header.from_bytes(data)
-        header.crc ^= 0xFFFF  # Invert CRC bits
+        header.crc = header.crc // 2
         return header.to_bytes()
