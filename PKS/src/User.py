@@ -112,6 +112,18 @@ class User:
     # Send message method
     def send_message(self, message: str):
         fragments = self.fragment_message(message, packet_type=2)
+        total_fragments = len(fragments)
+        fragment_size = self.max_fragment_size
+        last_fragment_size = len(fragments[total_fragments].data.encode("utf-8"))
+        message_size = len(message.encode("utf-8"))
+
+        print(f"Sending message of size {message_size} bytes")
+        print(f"Number of fragments: {total_fragments}")
+        print(f"Fragment size: {fragment_size} bytes")
+        if last_fragment_size != fragment_size:
+            print(f"Last fragment size: {last_fragment_size} bytes")
+
+
         for fragment_order, header in fragments.items():
             packet = {
                 'data': header.to_bytes(),
@@ -121,12 +133,25 @@ class User:
                 'header': header  # Keep header for retransmission
             }
             self.sender_queue.put(packet)
-            print(
-                f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
+            # print(
+            #     f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
 
     # Send file method
     def send_file(self, file_path: str):
         fragments = self.fragment_file(file_path, packet_type=3)
+        total_fragments = len(fragments)
+        fragment_size = self.max_fragment_size
+        last_fragment_size = len(fragments[total_fragments].data.encode("latin1"))
+        file_size = os.path.getsize(file_path)
+
+        filename = os.path.basename(file_path)
+
+        print(f"Sending file '{filename}' of size {file_size} bytes")
+        print(f"Number of fragments: {total_fragments}")
+        print(f"Fragment size: {fragment_size} bytes")
+        if last_fragment_size != fragment_size:
+            print(f"Last fragment size: {last_fragment_size} bytes")
+
         for fragment_order, header in fragments.items():
             packet = {
                 'data': header.to_bytes(),
@@ -136,8 +161,8 @@ class User:
                 'header': header  # Keep header for retransmission
             }
             self.sender_queue.put(packet)
-            print(
-                f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
+            # print(
+            #     f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
         if self.chat_gui:
             filename = os.path.basename(file_path)
             self.chat_gui.chat_log.append(f"You sent a file: {filename}")
@@ -163,17 +188,15 @@ class User:
 
             # Send the packet
             self.socket.sendto(packet['data'], packet['address'])
-            print(
-                f"Sent packet type {packet['packet_type']} fragment {packet['fragment_order']} to {packet['address']}")
+            # print(
+            #     f"Sent packet type {packet['packet_type']} fragment {packet['fragment_order']} to {packet['address']}")
             if wait_for_response:
                 # Wait for response
                 try:
-                    print(f"STUCK: {time.time()}")
                     response = self.response_queue.get(timeout=3)  # Increased timeout to 10 seconds
                     if response.packet_type == 5:  # ACK
                         acked_fragment = int(response.data)
                         if acked_fragment == packet['fragment_order']:
-                            print(f"{Fore.GREEN}ACK received for fragment {acked_fragment}")
                             break  # ACK received, proceed to next packet
                         else:
                             print(
@@ -196,9 +219,9 @@ class User:
                                     'header': header_to_resend
                                 }
                                 self.sender_queue.put(resend_packet)
-                                print(
-                                    f"Put type {resend_packet.get('packet_type')} into sender queue, sender queue "
-                                    f"state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
+                                # print(
+                                #     f"Put type {resend_packet.get('packet_type')} into sender queue, sender queue "
+                                #     f"state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
                                 print(f"Resending fragment {fragment_order}")
                         # Do not increment retries here; continue waiting for ACK
                         continue
@@ -231,10 +254,11 @@ class User:
             sender_ip, sender_port = address
             header = Header.from_bytes(data)
             if header.calculate_crc() != header.crc:
-                print(f"{Fore.RED}Invalid CRC for fragment {header.fragment_order}")
+                print(f"Received fragment {header.fragment_order} {Fore.RED}with errors")
                 # Send ARQ for the missing fragment
                 self.send_arq([header.fragment_order], address)
             else:
+                print(f"Received fragment {header.fragment_order}{Fore.GREEN} without error")
                 if self.peer is None:
                     self.handle_handshake(header, sender_ip, sender_port)
                 else:
@@ -245,16 +269,16 @@ class User:
                         # Send ACK
                         self.send_ack(header.fragment_order)
                     elif header.packet_type == 3:  # File packet
-                        print(f"Received file fragment {header.fragment_order}")
+                        #print(f"Received file fragment {header.fragment_order}")
                         # Process file fragment
                         self.handle_file_fragment(header)
                         # Send ACK
                         self.send_ack(header.fragment_order)
                     elif header.packet_type == 5:  # ACK
                         self.response_queue.put(header)
-                        print(
-                            f"Put type {header.packet_type} into sender queue, sender queue "
-                            f"state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
+                        # print(
+                        #     f"Put type {header.packet_type} into sender queue, sender queue "
+                        #     f"state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
                         print(f"{Fore.GREEN}ACK received for fragment {header.data}")
                     elif header.packet_type == 7:  # ARQ
                         print(f"{Fore.RED}ARQ received for fragments {header.data}")
@@ -274,8 +298,8 @@ class User:
                                     'header': header_to_resend
                                 }
                                 self.sender_queue.put(resend_packet)
-                                print(
-                                    f"Put type {resend_packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
+                                # print(
+                                #     f"Put type {resend_packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
                                 print(f"Resending fragment {fragment_order}")
                             else:
                                 print(f"No fragment found with order {fragment_order} to resend")
@@ -316,8 +340,8 @@ class User:
             print("SENT IMMEDIATE ACK")
         else:
             self.sender_queue.put(packet)
-        print(
-            f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
+        # print(
+        #     f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
         print(f"{Fore.GREEN}ACK sent for fragment {fragment_order}")
 
     # Send ACK
@@ -345,8 +369,8 @@ class User:
             'header': header
         }
         self.sender_queue.put(packet)
-        print(
-            f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
+        # print(
+        #     f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
         print(f"{Fore.YELLOW}ARQ sent for fragments {missing_fragments}")
 
     # Handle handshake
@@ -366,6 +390,8 @@ class User:
 
     # Handle message fragments
     def handle_message_fragment(self, header: Header):
+        if not hasattr(self, 'message_start_time'):
+            self.message_start_time = time.time()
         self.message_buffer[header.fragment_order] = header.data
         self.message_total_bytes += len(header.data.encode("utf-8"))
 
@@ -383,18 +409,25 @@ class User:
                 full_message = ''.join(
                     self.message_buffer[i] for i in sorted(self.message_buffer)
                 )
-                print(f"{Fore.MAGENTA}Message: {Fore.RESET}{full_message}")
-                print(f"{Fore.GREEN}Message total bytes: {self.message_total_bytes} bytes")
+                duration = time.time() - self.message_start_time
+                print()
+                print(f"{Fore.MAGENTA}Message received successfully: {full_message}")
+                print(f"Duration: {duration:.2f} seconds")
+                print(f"Message size: {self.message_total_bytes} bytes")
+                print()
                 if self.chat_gui:
                     self.chat_gui.display_message(f"{full_message}")
                 self.message_buffer.clear()  # Clear the buffer after reassembly
                 self.message_total_bytes = 0
+                del self.message_start_time  # Reset the start time
 
     # Handle file fragments
     def handle_file_fragment(self, header: Header):
+        if not hasattr(self, 'file_start_time'):
+            self.file_start_time = time.time()
         # Store fragment data
         self.file_buffer[header.fragment_order] = header.data
-        self.file_total_bytes += len(header.data.encode("latin1")) #utf-8????
+        self.file_total_bytes += len(header.data.encode("latin1"))
 
         if header.fragment_order == 1:
             # Extract filename
@@ -417,9 +450,17 @@ class User:
                 ).encode('latin1')
                 # Save the file
                 self.save_file(self.current_filename, full_file_data)
-                print(f"{Fore.GREEN}File total bytes: {self.file_total_bytes} bytes")
+                duration = time.time() - self.file_start_time
+                file_path = os.path.abspath(os.path.join(self.file_directory, self.current_filename))
+                print()
+                print(f"{Fore.MAGENTA}File received successfully")
+                print(f"Duration: {duration:.2f} seconds")
+                print(f"File size: {self.file_total_bytes} bytes")
+                print(f"File saved at: {file_path}")
+                print()
                 self.file_buffer.clear()  # Clear the buffer after reassembly
                 self.file_total_bytes = 0  # Reset total bytes counter
+                del self.file_start_time
 
     # Save received file
     def save_file(self, filename: str, data: bytes):
@@ -427,7 +468,6 @@ class User:
         try:
             with open(file_path, "wb") as f:
                 f.write(data)
-            print(f"{Fore.BLUE}File saved at: {file_path}")
             if self.chat_gui:
                 self.chat_gui.chat_log.append(f"Received a file: {filename}")
         except Exception as e:
@@ -444,8 +484,8 @@ class User:
             'header': header
         }
         self.sender_queue.put(packet)
-        print(
-            f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
+        # print(
+        #     f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
         print(f"{Fore.RED}SYN sent to {(ip, port)}")
 
     # Send SYN-ACK
@@ -459,8 +499,8 @@ class User:
             'header': header
         }
         self.sender_queue.put(packet)
-        print(
-            f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
+        # print(
+        #     f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
         print(f"{Fore.YELLOW}SYN-ACK sent to {(ip, port)}")
 
     # Sender loop
@@ -468,8 +508,8 @@ class User:
         while True:
             try:
                 packet = self.sender_queue.get()
-                print(
-                    f"Took type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
+                # print(
+                #     f"Took type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
                 if packet is None:
                     break  # Exit the thread
                 self.send_packet(packet)
@@ -508,8 +548,8 @@ class User:
                 'header': header
             }
             self.sender_queue.put(packet)
-            print(
-                f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
+            # print(
+            #     f"Put type {packet.get('packet_type')} into sender queue, sender queue state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
             print(f"{Fore.BLUE}Heartbeat sent.")
             self.heartbeats += 1
 
