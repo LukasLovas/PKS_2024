@@ -1,17 +1,16 @@
+import time
 import traceback
-from pathlib import Path
-
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QLineEdit, QPushButton, QMenu, QInputDialog, QFileDialog, \
     QLabel
 from PyQt6.QtCore import pyqtSignal, QThread
-import random
 
 
 class ChatGUI(QWidget):
     def __init__(self, user):
         super().__init__()
         self.user = user
+        self.user.chat_gui = self  # Link back to the GUI
 
         self.setWindowTitle(f"{self.user.ip}:{self.user.port}")
         self.setGeometry(300, 300, 400, 500)
@@ -57,12 +56,12 @@ class ChatGUI(QWidget):
         self.message_size_label.setText(f"Message size: {message_size} bytes")
 
     def create_menu(self):
-        """Creates the menu for fragment size and error simulation options."""
+        """Creates the menu for options."""
         menu = QMenu()
 
-        # Send file Option
-        fragment_size_action = menu.addAction("Send File")
-        fragment_size_action.triggered.connect(self.send_file)
+        # Send File Option
+        send_file_action = menu.addAction("Send File")
+        send_file_action.triggered.connect(self.send_file)
 
         # Fragment Size Option
         fragment_size_action = menu.addAction("Fragment Size")
@@ -71,10 +70,6 @@ class ChatGUI(QWidget):
         # Error Simulation CRC Option
         crc_error_action = menu.addAction("Error Simulation CRC")
         crc_error_action.triggered.connect(self.simulate_crc_error)
-
-        # Error Simulation Lost Packet Option
-        packet_loss_action = menu.addAction("Error Simulation Lost Packet")
-        packet_loss_action.triggered.connect(self.simulate_packet_loss)
 
         # Directory Option
         save_directory_action = menu.addAction("Set Save Directory")
@@ -98,6 +93,10 @@ class ChatGUI(QWidget):
             self.chat_log.append(f"Save directory updated to: {selected_dir}")
             print(f"Save directory updated to: {selected_dir}")
 
+    def simulate_crc_error(self):
+        self.user.enable_crc_error_simulation()
+        self.chat_log.append("CRC Error Simulation enabled for the next message.")
+
     def open_fragment_size_dialog(self):
         """Opens a modal dialog for setting fragment size."""
         fragment_size, ok = QInputDialog.getInt(self, "Set Fragment Size", "Fragment Size (bytes):",
@@ -106,42 +105,11 @@ class ChatGUI(QWidget):
             self.user.max_fragment_size = fragment_size
             print(f"Updated fragment limit to {fragment_size} bytes")
 
-    def simulate_crc_error(self):
-        message = "CRC TEST MESSAGE"
-        fragments = self.user.fragment_message(message, 2)  # 2 is for message packet type
-        if 1 in fragments:
-            fragments[1].crc = fragments[1].crc // 2  # Corrupt the CRC of the first fragment
-            print("Simulating CRC error...")
-            self.user.send_fragments(fragments)  # Send fragments as usual
-            print("CRC ERROR SIMULATION DONE")
-        else:
-            print("No fragments to corrupt.")
-
-    def simulate_packet_loss(self):
-        message = "This is a simulated packet loss test message."
-        fragments = self.user.fragment_message(message, 2)  # 2 is for message packet type
-
-        if fragments:
-            lost_fragments = random.sample(
-                list(fragments.keys()), k=min(2, len(fragments))
-            )  # Select up to 2 fragments to "lose"
-            print(f"Simulating packet loss, not sending fragments: {lost_fragments}")
-
-            # Send all fragments except those marked as "lost"
-            for fragment_order, header in fragments.items():
-                if fragment_order not in lost_fragments:
-                    self.user.send_fragment(header)
-                else:
-                    print(f"Fragment {fragment_order} is intentionally lost.")
-            print("Packet loss simulation completed.")
-        else:
-            print("No fragments to send.")
-
     def send_message(self):
         message = self.message_input.text()
         if message:
             self.chat_log.append(f"You: {message}")
-            self.user.send(message, 2)
+            self.user.send_message(message)
             self.message_input.clear()
 
     def display_message(self, message):
@@ -164,6 +132,5 @@ class ListenThread(QThread):
 
     def run(self):
         while True:
-            message = self.user.listen()
-            if message:
-                self.new_message.emit(message)
+            # The listen method now handles message reassembly and GUI updates
+            time.sleep(1)

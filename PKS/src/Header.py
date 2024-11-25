@@ -1,6 +1,4 @@
 from crc import Calculator, Crc16
-
-
 class Header:
     def __init__(self, packet_type: int, fragment_order: int, next_fragment: int, data: str = "", crc: int = None):
         self.packet_type = packet_type

@@ -1,4 +1,4 @@
-import os.path
+import os
 import queue
 import socket
 import threading
@@ -22,6 +22,7 @@ class User:
         self.handshake_done = False
         self.header_buffer = {}  # Receiving headers buffer
         self.fragments = {}  # Fragments to send
+        self.sender_queue = queue.Queue()
         self.response_queue = queue.Queue()  # Response queue
         self.keepalive_running = False
         self.heartbeats = 0  # Heartbeats without response
@@ -29,10 +30,19 @@ class User:
         self.current_filename = None
         self.file_directory = self.setup_file_dir()
         self.keepalive_thread = None
+        self.sender_thread = None
+        self.crc_error_simulation = False
+        self.lock = threading.Lock()
         print(f"User listening on {self.ip}:{self.port}")
 
+        # Start sender and receiver threads
+        self.sender_thread = threading.Thread(target=self.send_queue_loop, daemon=True)
+        self.sender_thread.start()
+        self.receiver_thread = threading.Thread(target=self.listen_loop, daemon=True)
+        self.receiver_thread.start()
+
     def setup_file_dir(self, directory_name="received_files"):
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        project_root = os.path.abspath(os.path.dirname(__file__))
         file_dir_path = os.path.join(project_root, directory_name)
         if not os.path.exists(file_dir_path):
             os.makedirs(file_dir_path)
@@ -51,7 +61,7 @@ class User:
         def connection_tuple(self):
             return self.peer_ip, self.peer_port
 
-    def fragment_message(self, data: str, packet_type: int) -> dict:
+    def fragment_message(self, data: str, packet_type: int):
         fragment_size = self.max_fragment_size
         data_encoded = data.encode("utf-8")
         total_fragments = (len(data_encoded) + fragment_size - 1) // fragment_size
@@ -63,241 +73,346 @@ class User:
             next_fragment = 0x01 if fragment_order < total_fragments else 0x02
             header = Header.create_header(packet_type, fragment_data, fragment_order, next_fragment)
             fragments[fragment_order] = header
-            self.fragments[header.fragment_order] = header
-        print(fragments.keys())
+            self.fragments[header.fragment_order] = header  # Store for potential retransmission
+
         return fragments
 
-    def fragment_file(self, data: bytes, packet_type: int) -> dict:
+    def fragment_file(self, file_path: str, packet_type: int):
         fragment_size = self.max_fragment_size
-        total_fragments = (len(data) + fragment_size - 1) // fragment_size
+        with open(file_path, "rb") as file:
+            file_data = file.read()
+
+        filename = os.path.basename(file_path)
+        data_encoded = filename.encode("utf-8") + DELIMITER.encode("utf-8") + file_data
+
+        total_fragments = (len(data_encoded) + fragment_size - 1) // fragment_size
         fragments = {}
 
         for i in range(total_fragments):
             fragment_order = i + 1
-            fragment_data = data[i * fragment_size:(i + 1) * fragment_size].decode("utf-8")
+            fragment_data = data_encoded[i * fragment_size:(i + 1) * fragment_size]
+            # Since data is bytes, we need to handle it appropriately
+            fragment_data_str = fragment_data.decode('latin1')  # Use 'latin1' to convert bytes to string
             next_fragment = 0x01 if fragment_order < total_fragments else 0x02
-            fragments[fragment_order] = Header.create_header(packet_type, fragment_data, fragment_order, next_fragment)
+            header = Header.create_header(packet_type, fragment_data_str, fragment_order, next_fragment)
+            fragments[fragment_order] = header
+            self.fragments[header.fragment_order] = header  # Store for potential retransmission
 
-        print(fragments.keys())
         return fragments
 
-    def send_fragments(self, fragments: dict):
-        print(f"{Fore.YELLOW}# of fragments to send: {len(fragments)}")
-        unacknowledged_fragments = set(fragments.keys())  # Start with all fragments unacknowledged
+    # Send message method
+    def send_message(self, message: str):
+        fragments = self.fragment_message(message, packet_type=2)
+        for fragment_order, header in fragments.items():
+            packet = {
+                'data': header.to_bytes(),
+                'address': self.peer.connection_tuple(),
+                'packet_type': header.packet_type,
+                'fragment_order': header.fragment_order,
+                'header': header  # Keep header for retransmission
+            }
+            self.sender_queue.put(packet)
+
+    # Send file method
+    def send_file(self, file_path: str):
+        fragments = self.fragment_file(file_path, packet_type=3)
+        for fragment_order, header in fragments.items():
+            packet = {
+                'data': header.to_bytes(),
+                'address': self.peer.connection_tuple(),
+                'packet_type': header.packet_type,
+                'fragment_order': header.fragment_order,
+                'header': header  # Keep header for retransmission
+            }
+            self.sender_queue.put(packet)
+        if self.chat_gui:
+            filename = os.path.basename(file_path)
+            self.chat_gui.chat_log.append(f"You sent a file: {filename}")
+
+    # Unified sending method
+    def send_packet(self, packet):
+        # Determine if we need to wait for an ACK based on packet type
+        # Data packets (2,3,7,8) require ACK
+        wait_for_ack = packet['packet_type'] in [2, 3, 7, 8]
         max_retries = 3
         retries = 0
+        while retries < max_retries:
+            with self.lock:
+                if self.crc_error_simulation and retries == 0 and packet['packet_type'] == 2:
+                    # Simulate CRC error on first attempt
+                    packet['data'] = self.corrupt_packet(packet['data'])
+                    print(f"{Fore.RED}Simulated CRC error in fragment {packet['fragment_order']}")
+                    self.crc_error_simulation = False
+                elif retries > 0:
+                    # Recalculate CRC in case it was previously corrupted
+                    packet['header'].crc = packet['header'].calculate_crc()
+                    packet['data'] = packet['header'].to_bytes()
 
-        while unacknowledged_fragments and retries < max_retries:
-            for fragment_order in list(unacknowledged_fragments):
-                header = fragments[fragment_order]
-
-                if retries > 0:
-                    if header.crc != header.calculate_crc():
-                        print(
-                            f"{Fore.RED}CRC mismatch: fragment {fragment_order}")
-                        header.crc = header.calculate_crc()
-
-                self.send_fragment(header)
-
+            # Send the packet
+            self.socket.sendto(packet['data'], packet['address'])
+            print(f"Sent packet type {packet['packet_type']} fragment {packet['fragment_order']} to {packet['address']}")
+            if wait_for_ack:
+                # Wait for ACK
                 try:
-                    response = self.response_queue.get(timeout=60)
+                    response = self.response_queue.get(timeout=5)
                     if response.packet_type == 5:  # ACK
-                        acked_fragment = int(response.data)  # ACK data contains the fragment order
-                        if acked_fragment in unacknowledged_fragments:
-                            unacknowledged_fragments.remove(acked_fragment)
-
+                        acked_fragment = int(response.data)
+                        if acked_fragment == packet['fragment_order']:
+                            print(f"{Fore.GREEN}ACK received for fragment {acked_fragment}")
+                            break  # ACK received, proceed to next packet
+                        else:
+                            print(f"{Fore.YELLOW}Received ACK for fragment {acked_fragment}, expected {packet['fragment_order']}")
                     elif response.packet_type == 7:  # ARQ
                         missing_fragments = list(map(int, response.data.split(",")))
-                        for missing in missing_fragments:
-                            if missing in fragments:
-                                unacknowledged_fragments.add(missing)
-
+                        print(f"{Fore.RED}ARQ received for fragments {missing_fragments}")
+                        # Resend missing fragments
+                        for fragment_order in missing_fragments:
+                            if fragment_order in self.fragments:
+                                header_to_resend = self.fragments[fragment_order]
+                                header_to_resend.crc = header_to_resend.calculate_crc()
+                                resend_packet = {
+                                    'data': header_to_resend.to_bytes(),
+                                    'address': packet['address'],
+                                    'packet_type': header_to_resend.packet_type,
+                                    'fragment_order': header_to_resend.fragment_order,
+                                    'header': header_to_resend
+                                }
+                                self.sender_queue.put(resend_packet)
+                                print(f"Resending fragment {fragment_order}")
+                        # For the current packet, increment retries
+                        retries += 1
                 except queue.Empty:
-                    print(f"{Fore.RED}Timeout waiting for ACK or ARQ for fragments: {unacknowledged_fragments}")
-
-            retries += 1
-            print(f"{Fore.YELLOW}Retrying unacknowledged fragments ({len(unacknowledged_fragments)} remaining)...")
-
-        if unacknowledged_fragments:
-            print(f"{Fore.RED}Failed to send all fragments after {max_retries} retries: {unacknowledged_fragments}")
-        else:
-            print(f"{Fore.GREEN}All fragments sent successfully.")
-
-    def send_fragment(self, header: Header):
-        if self.socket:
-            self.socket.sendto(header.to_bytes(), self.peer.connection_tuple())
-        #print(f"{Fore.LIGHTCYAN_EX}Sent fragment {header.fragment_order}| Next fragment: {True if header.next_fragment == 1 else False}{Fore.RESET}")
-        # print(f"{Fore.LIGHTCYAN_EX}{header}")
-
-    def send(self, message: str, packet_type: int):
-        fragments = self.fragment_message(message, packet_type)
-        self.send_fragments(fragments)
-
-    def send_file(self, file_path):
-        filename = os.path.basename(file_path)
-        with open(file_path, "rb") as file:
-            file_data = file.read()
-            header_data = f"{filename}{DELIMITER}".encode("utf-8") + file_data
-            fragments = self.fragment_file(header_data, packet_type=3)
-            self.send_fragments(fragments)
-
-    def receive_message(self):
-        try:
-            message, address = self.socket.recvfrom(1500)
-            sender_ip, sender_port = address
-            header = Header.from_bytes(message)
-            return header, sender_ip, sender_port
-        except ConnectionResetError:
-            self.handle_connection_loss()
-        except OSError as e:
-            if e.errno == 10038:  # WinError 10038: Operation on a closed socket
-                return None
+                    print(f"{Fore.YELLOW}Timeout waiting for ACK for fragment {packet['fragment_order']}, retrying...")
+                    retries += 1
             else:
-                self.handle_connection_loss()
-        except Exception as e:
-            print(f"Unexpected error receiving message: {e}")
-        return None
+                # Control packets, no need to wait for ACK
+                break
 
+        if wait_for_ack and retries == max_retries:
+            print(f"{Fore.RED}Failed to send packet after {max_retries} retries")
+
+    # Sender loop
+    def send_queue_loop(self):
+        while True:
+            try:
+                packet = self.sender_queue.get()
+                if packet is None:
+                    break  # Exit the thread
+                self.send_packet(packet)
+            except Exception as e:
+                print(f"Error in sending thread: {e}")
+
+    # Receiver loop
+    def listen_loop(self):
+        while True:
+            self.listen()
+
+    # Process received packets
+    # Process received packets
     def listen(self):
-        header, sender_ip, sender_port = self.receive_message()
-        if header:
-            if header.calculate_crc() == header.crc:  # Validate CRC
+        try:
+            data, address = self.socket.recvfrom(1500)
+            sender_ip, sender_port = address
+            header = Header.from_bytes(data)
+            if header.calculate_crc() != header.crc:
+                print(f"{Fore.RED}Invalid CRC for fragment {header.fragment_order}")
+                # Send ARQ for the missing fragment
+                self.send_arq([header.fragment_order], address)
+            else:
                 if self.peer is None:
                     self.handle_handshake(header, sender_ip, sender_port)
                 else:
                     if header.packet_type == 2:  # Message packet
-                        print(f"Received fragment no. {header.fragment_order} for message.")
-
-                        # Store the fragment in the buffer
-                        if header.fragment_order not in self.header_buffer:
-                            self.header_buffer[header.fragment_order] = header.data
-                            self.send_ack(sender_ip, sender_port, header.fragment_order)
-                        else:
-                            print(f"Duplicate fragment {header.fragment_order} received and ignored.")
-
-                        if header.next_fragment == 0x02:  # Last fragment
-                            # Check for missing fragments
-                            missing_fragments = [
-                                i for i in range(1, max(self.header_buffer.keys()) + 1)
-                                if i not in self.header_buffer
-                            ]
-                            if missing_fragments:
-                                print(f"Missing fragments: {missing_fragments}")
-                                self.send_arq(",".join(map(str, missing_fragments)))
-                            else:
-                                # Reassemble the full message
-                                full_message = ''.join(
-                                    self.header_buffer[i] for i in sorted(self.header_buffer)
-                                )
-                                print(f"{Fore.MAGENTA}Reassembled full message: {Fore.RESET}{full_message}")
-                                self.header_buffer.clear()  # Clear the buffer after reassembly
-                                return full_message  # Pass the message back to the ChatGUI
-
+                        print(f"Received message fragment {header.fragment_order}")
+                        # Process message fragment
+                        self.handle_message_fragment(header)
+                        # Send ACK
+                        self.send_ack(header.fragment_order)
                     elif header.packet_type == 3:  # File packet
-                        print(f"Received fragment no. {header.fragment_order}")
-
-                        if header.fragment_order == 1:
-                            file_data = header.data.split(DELIMITER, 1)
-                            self.current_filename = file_data[0]
-                            header.data = file_data[1]
-
-                        # fragment reassembly
-                        if header.fragment_order not in self.header_buffer:
-                            self.header_buffer[header.fragment_order] = header.data.encode("utf-8")
-                            self.send_ack(sender_ip, sender_port, header.fragment_order)
-
-                        else:
-                            print(f"Duplicate fragment {header.fragment_order} received and ignored.")
-                        if header.next_fragment == 0x02:  # Last fragment
-                            missing_fragments = [
-                                i for i in range(1, max(self.header_buffer.keys()) + 1)
-                                if i not in self.header_buffer
-                            ]
-                            if missing_fragments:
-                                print(f"Missing fragments: {missing_fragments}")
-                                self.send_arq(",".join(map(str, missing_fragments)))
-                            else:
-                                full_file_data = b"".join(
-                                    self.header_buffer[i] for i in sorted(self.header_buffer)
-                                )
-                                self.save_file(self.current_filename, full_file_data)
-                                self.header_buffer.clear()
-                                print("File reassembled and saved successfully.")
-
-                    elif header.packet_type == 4:  # Heartbeat
-                        self.heartbeats = 0
-
+                        print(f"Received file fragment {header.fragment_order}")
+                        # Process file fragment
+                        self.handle_file_fragment(header)
+                        # Send ACK
+                        self.send_ack(header.fragment_order)
                     elif header.packet_type == 5:  # ACK
                         self.response_queue.put(header)
                         print(f"{Fore.GREEN}ACK received for fragment {header.data}")
-
                     elif header.packet_type == 7:  # ARQ
-                        self.response_queue.put(header)
-                        self.send_ack(sender_ip, sender_port, header.fragment_order)
-                        print(f"{Fore.RED}ARQ received: Missing fragments {header.data}")
+                        print(f"{Fore.RED}ARQ received for fragments {header.data}")
+                        # Send ACK for ARQ
+                        self.send_ack(0)
+                        # Resend the requested fragments
+                        missing_fragments = list(map(int, header.data.split(",")))
+                        for fragment_order in missing_fragments:
+                            if fragment_order in self.fragments:
+                                header_to_resend = self.fragments[fragment_order]
+                                header_to_resend.crc = header_to_resend.calculate_crc()
+                                resend_packet = {
+                                    'data': header_to_resend.to_bytes(),
+                                    'address': (self.peer.peer_ip, self.peer.peer_port),
+                                    'packet_type': header_to_resend.packet_type,
+                                    'fragment_order': header_to_resend.fragment_order,
+                                    'header': header_to_resend
+                                }
+                                self.sender_queue.put(resend_packet)
+                                print(f"Resending fragment {fragment_order}")
+                            else:
+                                print(f"No fragment found with order {fragment_order} to resend")
+                    elif header.packet_type == 1:  # SYN
+                        print(f"SYN received from {address}")
+                        self.set_peer(sender_ip, sender_port)
+                        self.send_syn_ack(sender_ip, sender_port)
+                    elif header.packet_type == 6:  # SYN-ACK
+                        print(f"SYN-ACK received from {address}")
+                        self.set_peer(sender_ip, sender_port)
+                        self.send_ack(0)
+                        self.handshake_done = True
+                    elif header.packet_type == 4:  # Heartbeat
+                        self.heartbeats = 0
+                        print("Heartbeat received")
+                    # Handle other packet types as needed
+        except Exception as e:
+            print(f"Error in listen loop: {e}")
 
+    # Send ACK
+    def send_ack(self, fragment_order=1):
+        header = Header.create_header(5, str(fragment_order))
+        packet = {
+            'data': header.to_bytes(),
+            'address': (self.peer.peer_ip, self.peer.peer_port),
+            'packet_type': header.packet_type,
+            'fragment_order': fragment_order,
+            'header': header
+        }
+        self.sender_queue.put(packet)
+        print(f"{Fore.GREEN}ACK sent for fragment {fragment_order}")
 
-
-            else:
-                print(f"{Fore.RED}Invalid CRC for fragment {header.fragment_order}")
-                self.send_arq(str(header.fragment_order))
-
-    def send_arq(self, missing_fragments):
+    # Send ARQ
+    def send_arq(self, missing_fragments, address):
         missing_fragments_str = ",".join(map(str, missing_fragments))
-        print(f"Sending ARQ for missing fragments: {missing_fragments_str}")
-        fragments = self.fragment_message(missing_fragments_str, packet_type=7)
-        self.send_fragments(fragments)
+        header = Header.create_header(7, missing_fragments_str)
+        packet = {
+            'data': header.to_bytes(),
+            'address': address,
+            'packet_type': header.packet_type,
+            'fragment_order': 0,
+            'header': header
+        }
+        self.sender_queue.put(packet)
+        print(f"{Fore.YELLOW}ARQ sent for fragments {missing_fragments}")
 
+    # Handle handshake
     def handle_handshake(self, header, sender_ip, sender_port):
         if header.packet_type == 1:
-            print(f"{Fore.LIGHTGREEN_EX}SYN {Fore.MAGENTA} received")
+            print(f"{Fore.LIGHTGREEN_EX}SYN received")
             self.send_syn_ack(sender_ip, sender_port)
         elif header.packet_type == 6:
-            print(f"{Fore.LIGHTGREEN_EX}SYN-ACK {Fore.MAGENTA} received")
-            self.send_ack(sender_ip, sender_port)
+            print(f"{Fore.LIGHTGREEN_EX}SYN-ACK received")
             self.set_peer(sender_ip, sender_port)
+            self.send_ack(0)
             self.handshake_done = True
         elif header.packet_type == 5:
-            print(f"{Fore.LIGHTGREEN_EX}ACK {Fore.MAGENTA} received")
+            print(f"{Fore.LIGHTGREEN_EX}ACK received")
             self.set_peer(sender_ip, sender_port)
             self.handshake_done = True
 
-    def save_file(self, filename: str, file_data: bytes):
+    # Handle message fragments
+    def handle_message_fragment(self, header: Header):
+        if not hasattr(self, 'message_buffer'):
+            self.message_buffer = {}
+        self.message_buffer[header.fragment_order] = header.data
+
+        if header.next_fragment == 0x02:  # Last fragment
+            # Check for missing fragments
+            missing_fragments = [
+                i for i in range(1, max(self.message_buffer.keys()) + 1)
+                if i not in self.message_buffer
+            ]
+            if missing_fragments:
+                print(f"Missing message fragments: {missing_fragments}")
+                self.send_arq(missing_fragments, self.peer.connection_tuple())
+            else:
+                # Reassemble the full message
+                full_message = ''.join(
+                    self.message_buffer[i] for i in sorted(self.message_buffer)
+                )
+                print(f"{Fore.MAGENTA}Reassembled full message: {Fore.RESET}{full_message}")
+                if self.chat_gui:
+                    self.chat_gui.display_message(f"{full_message}")
+                self.message_buffer.clear()  # Clear the buffer after reassembly
+
+    # Handle file fragments
+    def handle_file_fragment(self, header: Header):
+        if not hasattr(self, 'file_buffer'):
+            self.file_buffer = {}
+            self.current_filename = None
+
+        # Store fragment data
+        self.file_buffer[header.fragment_order] = header.data
+
+        if header.fragment_order == 1:
+            # Extract filename
+            data_parts = header.data.split(DELIMITER, 1)
+            self.current_filename = data_parts[0]
+            self.file_buffer[header.fragment_order] = data_parts[1] if len(data_parts) > 1 else ''
+
+        if header.next_fragment == 0x02:  # Last fragment
+            # Check for missing fragments
+            missing_fragments = [
+                i for i in range(1, max(self.file_buffer.keys()) + 1)
+                if i not in self.file_buffer
+            ]
+            if missing_fragments:
+                print(f"Missing file fragments: {missing_fragments}")
+                self.send_arq(missing_fragments, self.peer.connection_tuple())
+            else:
+                # Reassemble the full file data
+                full_file_data = ''.join(
+                    self.file_buffer[i] for i in sorted(self.file_buffer)
+                ).encode('latin1')
+                # Save the file
+                self.save_file(self.current_filename, full_file_data)
+                self.file_buffer.clear()  # Clear the buffer after reassembly
+
+    # Save received file
+    def save_file(self, filename: str, data: bytes):
         file_path = os.path.join(self.file_directory, filename)
         try:
-            with open(file_path, "wb") as file:
-                file.write(file_data)
-                print(f"{Fore.BLUE}File saved at: {file_path}")
+            with open(file_path, "wb") as f:
+                f.write(data)
+            print(f"{Fore.BLUE}File saved at: {file_path}")
+            if self.chat_gui:
+                self.chat_gui.chat_log.append(f"Received a file: {filename}")
         except Exception as e:
             print(f"{Fore.RED}Error saving file '{filename}': {e}")
 
+    # Send SYN
     def send_syn(self, ip: str, port: int) -> None:
         header = Header.create_header(1, "")
-        header_data = header.to_bytes()
-        self.socket.sendto(header_data, (ip, port))
-        print(f"{Fore.RED}SYN {Fore.LIGHTCYAN_EX}sent")
+        packet = {
+            'data': header.to_bytes(),
+            'address': (ip, port),
+            'packet_type': header.packet_type,
+            'fragment_order': 0,
+            'header': header
+        }
+        self.sender_queue.put(packet)
+        print(f"{Fore.RED}SYN sent to {(ip, port)}")
 
+    # Send SYN-ACK
     def send_syn_ack(self, ip: str, port: int) -> None:
         header = Header.create_header(6, "")
-        header_data = header.to_bytes()
-        self.socket.sendto(header_data, (ip, port))
-        print(f"{Fore.YELLOW}SYN-ACK {Fore.LIGHTCYAN_EX}sent")
+        packet = {
+            'data': header.to_bytes(),
+            'address': (ip, port),
+            'packet_type': header.packet_type,
+            'fragment_order': 0,
+            'header': header
+        }
+        self.sender_queue.put(packet)
+        print(f"{Fore.YELLOW}SYN-ACK sent to {(ip, port)}")
 
-    def send_ack(self, ip: str, port: int, fragment_order=1) -> None:
-        header = Header.create_header(5, str(fragment_order))
-        header_data = header.to_bytes()
-        self.socket.sendto(header_data, (ip, port))
-        print(f"{Fore.GREEN}ACK {Fore.LIGHTCYAN_EX}sent")
-
-    def start_listening_thread(self) -> threading.Thread:
-        listen_thread = threading.Thread(target=self.listen_handshake, daemon=True)
-        listen_thread.start()
-        return listen_thread
-
-    def listen_handshake(self):
-        while not self.handshake_done:
-            self.listen()
-
+    # Close socket
     def close_socket(self):
         self.keepalive_running = False
         try:
@@ -308,13 +423,12 @@ class User:
         except Exception as e:
             print(f"Error while closing socket: {e}")
 
-    ###KEEP ALIVE CAST
-
+    # Start keepalive thread
     def start_keepalive_thread(self):
         self.keepalive_running = True
         self.keepalive_thread = threading.Thread(target=self.keepalive_loop, daemon=True)
-        self.keepalive_thread.start()
         print(f"Keepalive started for {self.peer.peer_ip}:{self.peer.peer_port}")
+        self.keepalive_thread.start()
 
     def keepalive_loop(self):
         while self.keepalive_running:
@@ -333,8 +447,15 @@ class User:
     def send_heartbeat(self):
         if self.peer:
             header = Header.create_header(packet_type=4, data="")
-            self.send_fragment(header)
-            #print(f"{Fore.BLUE}Heartbeat sent.")
+            packet = {
+                'data': header.to_bytes(),
+                'address': (self.peer.peer_ip, self.peer.peer_port),
+                'packet_type': header.packet_type,
+                'fragment_order': 0,
+                'header': header
+            }
+            self.sender_queue.put(packet)
+            print(f"{Fore.BLUE}Heartbeat sent.")
             self.heartbeats += 1
 
     def handle_connection_loss(self):
@@ -350,3 +471,12 @@ class User:
         if self.chat_gui:
             self.chat_gui.display_message("Connection lost. Communication terminated.")
 
+    # Simulate CRC error
+    def enable_crc_error_simulation(self):
+        self.crc_error_simulation = True
+
+    # Corrupt packet for CRC error simulation
+    def corrupt_packet(self, data: bytes) -> bytes:
+        header = Header.from_bytes(data)
+        header.crc ^= 0xFFFF  # Invert CRC bits
+        return header.to_bytes()
