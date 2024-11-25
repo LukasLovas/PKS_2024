@@ -105,7 +105,7 @@ class User:
             next_fragment = 0x01 if fragment_order < total_fragments else 0x02
             header = Header.create_header(packet_type, fragment_data_str, fragment_order, next_fragment)
             fragments[fragment_order] = header
-            self.fragments[header.fragment_order] = header  # Store for potential retransmission
+            self.fragments[header.fragment_order] = header
 
         return fragments
 
@@ -130,7 +130,7 @@ class User:
                 'address': self.peer.connection_tuple(),
                 'packet_type': header.packet_type,
                 'fragment_order': header.fragment_order,
-                'header': header  # Keep header for retransmission
+                'header': header
             }
             self.sender_queue.put(packet)
             # print(
@@ -158,7 +158,7 @@ class User:
                 'address': self.peer.connection_tuple(),
                 'packet_type': header.packet_type,
                 'fragment_order': header.fragment_order,
-                'header': header  # Keep header for retransmission
+                'header': header
             }
             self.sender_queue.put(packet)
             # print(
@@ -169,44 +169,36 @@ class User:
 
     # Unified sending method
     def send_packet(self, packet):
-        # Determine if we need to wait for an ACK based on packet type
-        # Data packets (2,3,7,8) require ACK
+        # Data packets 2,3,7 require ACK
         wait_for_response = packet['packet_type'] in [2, 3, 7]
         max_retries = 3
         retries = 0
         while retries < max_retries:
             with self.lock:
                 if self.crc_error_simulation and retries == 0 and packet['packet_type'] == 2:
-                    # Simulate CRC error on first attempt
                     packet['data'] = self.corrupt_packet(packet['data'])
                     print(f"{Fore.RED}Simulated CRC error in fragment {packet['fragment_order']}")
                     self.crc_error_simulation = False
                 elif retries > 0:
-                    # Recalculate CRC in case it was previously corrupted
                     packet['header'].crc = packet['header'].calculate_crc()
                     packet['data'] = packet['header'].to_bytes()
 
-            # Send the packet
             self.socket.sendto(packet['data'], packet['address'])
             # print(
             #     f"Sent packet type {packet['packet_type']} fragment {packet['fragment_order']} to {packet['address']}")
             if wait_for_response:
-                # Wait for response
                 try:
                     response = self.response_queue.get(timeout=3)  # Increased timeout to 10 seconds
                     if response.packet_type == 5:  # ACK
                         acked_fragment = int(response.data)
                         if acked_fragment == packet['fragment_order']:
-                            break  # ACK received, proceed to next packet
+                            break  # ACK received
                         else:
                             print(
                                 f"{Fore.YELLOW}Received ACK for fragment {acked_fragment}, expected {packet['fragment_order']}")
                     elif response.packet_type == 7:  # ARQ
                         missing_fragments = list(map(int, response.data.split(",")))
                         print(f"{Fore.RED}ARQ received for fragments {missing_fragments}")
-                        # Send ACK for ARQ
-                        # self.send_ack(0, True)
-                        # Resend missing fragments
                         for fragment_order in missing_fragments:
                             if fragment_order in self.fragments:
                                 header_to_resend = self.fragments[fragment_order]
@@ -223,13 +215,13 @@ class User:
                                 #     f"Put type {resend_packet.get('packet_type')} into sender queue, sender queue "
                                 #     f"state: {[packet['packet_type'] for packet in self.sender_queue.queue]}")
                                 print(f"Resending fragment {fragment_order}")
-                        # Do not increment retries here; continue waiting for ACK
+                        # continue waiting for ACK
                         continue
                 except queue.Empty:
                     print(f"{Fore.YELLOW}Timeout waiting for ACK for fragment {packet['fragment_order']}, retrying...")
                     retries += 1
             else:
-                # Control packets, no need to wait for ACK
+                # no need to wait for ACK
                 break
 
         if wait_for_response and retries == max_retries:
@@ -255,7 +247,6 @@ class User:
             header = Header.from_bytes(data)
             if header.calculate_crc() != header.crc:
                 print(f"Received fragment {header.fragment_order} {Fore.RED}with errors")
-                # Send ARQ for the missing fragment
                 self.send_arq([header.fragment_order], address)
             else:
                 print(f"Received fragment {header.fragment_order}{Fore.GREEN} without error")
@@ -264,15 +255,11 @@ class User:
                 else:
                     if header.packet_type == 2:  # Message packet
                         print(f"Received message fragment {header.fragment_order}")
-                        # Process message fragment
                         self.handle_message_fragment(header)
-                        # Send ACK
                         self.send_ack(header.fragment_order)
                     elif header.packet_type == 3:  # File packet
                         #print(f"Received file fragment {header.fragment_order}")
-                        # Process file fragment
                         self.handle_file_fragment(header)
-                        # Send ACK
                         self.send_ack(header.fragment_order)
                     elif header.packet_type == 5:  # ACK
                         self.response_queue.put(header)
@@ -282,9 +269,7 @@ class User:
                         print(f"{Fore.GREEN}ACK received for fragment {header.data}")
                     elif header.packet_type == 7:  # ARQ
                         print(f"{Fore.RED}ARQ received for fragments {header.data}")
-                        # Send ACK for ARQ
                         self.send_ack(0, True)
-                        # Resend the requested fragments
                         missing_fragments = list(map(int, header.data.split(",")))
                         for fragment_order in missing_fragments:
                             if fragment_order in self.fragments:
@@ -417,20 +402,18 @@ class User:
                 print()
                 if self.chat_gui:
                     self.chat_gui.display_message(f"{full_message}")
-                self.message_buffer.clear()  # Clear the buffer after reassembly
+                self.message_buffer.clear()
                 self.message_total_bytes = 0
-                del self.message_start_time  # Reset the start time
+                del self.message_start_time
 
     # Handle file fragments
     def handle_file_fragment(self, header: Header):
         if not hasattr(self, 'file_start_time'):
             self.file_start_time = time.time()
-        # Store fragment data
         self.file_buffer[header.fragment_order] = header.data
         self.file_total_bytes += len(header.data.encode("latin1"))
 
         if header.fragment_order == 1:
-            # Extract filename
             data_parts = header.data.split(DELIMITER, 1)
             self.current_filename = data_parts[0]
             self.file_buffer[header.fragment_order] = data_parts[1] if len(data_parts) > 1 else ''
@@ -458,8 +441,8 @@ class User:
                 print(f"File size: {self.file_total_bytes} bytes")
                 print(f"File saved at: {file_path}")
                 print()
-                self.file_buffer.clear()  # Clear the buffer after reassembly
-                self.file_total_bytes = 0  # Reset total bytes counter
+                self.file_buffer.clear()
+                self.file_total_bytes = 0
                 del self.file_start_time
 
     # Save received file
